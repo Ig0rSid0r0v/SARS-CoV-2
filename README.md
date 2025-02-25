@@ -8,8 +8,8 @@ This project implements a complete workflow for analyzing blood samples from SAR
 
 The project performs the following tasks:
 1. **Read Quality Control:**  
-   - Assess read quality using 'fasqc'.
-   - Identify issues such as high N-content, low quality in short reads, and contamination.
+   - Evaluate read quality using the 'fasqc' tool.
+   - Detect problems such as high nucleotide content, low-quality short reads, and contamination.
 
 2. **Trimming:**  
    - Remove low-quality bases and adapter sequences using `fastp`.
