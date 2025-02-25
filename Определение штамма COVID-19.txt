@@ -1,0 +1,85 @@
+1.Контроль качества:
+
+1.40% N в коротких (до 35 пар оснований) считываниях
+2. К концу все считывания содержат G
+3. Общее низкое качество, особенно для коротких считываний + очень большое количество коротких считываний
+4. Присутствует загрязнение
+
+2. Обрезка:
+for i in $(seq 2164372 21643281); do fastp -i SRR${i}_1.fastq -I SRR${i}_2.fastq -o SRR${i}_1_trimmed.fastq -O SRR${i}_2_trimmed.fastq --detect_adapter_for_pe --trim_from1 20 --trim_from2 20 --cut_tail1 --cut_tail2 --cut_mean_quality 20 -g --n_base_limit 5 --length_required 40 --max_len1 150 --max_len2 150; done 2>err.txt 
+fastqc *_*_trimmed.fastq -o ../trimmed/report
+
+3. Проверка качества после тримминга 
+multiqc .
+
+4. Индексирование на референс:
+
+for i in {1..10}; do bowtie2 -x ~/project/wuhan_bow -1 ~/project/covid_raw/trimmed/SRR${i}_1_trrimmed.fastq -2 ~/project/covid_raw/SRR${i}_2_trimmed.fastq  -a  --very_sensitive  --local -N 1 -L 10 --rg "SM:index${i}" --rg-id SRR${i}  > ~/project/sorted/2/SRR_${i}.bam; done
+
+5. Картирование и добавление @RG 
+
+bowtie2 -a  --very-sensitive  --local -N 1 -L 10 --rg "SM:*${i}" --rg-id SRR*_*${i}
+
+6. Индексация и сортировка:
+for i in {1..10};  do samtools sort ~/project/sorted/2/sample_${i}.bam -o ~/project/sorted/2/sample_${i}_sorted.bam; done
+
+for i in {1..10}; do samtools index ~/project/sorted/2/sample_${i}_sorted.bam; done
+
+for i in {1..10}; do samtools view sample_${i}_sorted.bam -o sample_${i}_sorted.sam; done
+
+7. Результат картирования:
+parallel -j3 echo -ne {} "\"\\t\"" ";" samtools stats {} "|" grep ^SN "|" grep -P \"reads mapped\" -A 1  -B 1 ::: $(ls sample_*_sorted.bam)
+
+8. Поиск близких организмов:
+samtools stats sample_*_sorted.bam | grep ^SN
+
+9. Получение координат S-гена из аннотации:
+
+grep -w 'ген «S»' wuhan.gtf | awk '$3==«ген»' > gene_S.gtf
+awk 'BEGIN{OFS="\t"} {вывести $1, $4-1, $5, $3, ".", $7}' gene_S.gtf > gene_S.bed
+
+
+10.Оценка покрытия — создание .bed-файла для области S-гена на основе аннотации .gtf
+for i in {1..10}; do bedtools coverage -a ~/project/sorted/gene_S.bed -b ~/project/sorted/2/sample_${i}_sorted.bam >> coverage_gene_S.txt; done
+
+
+11. Поиск геномных вариаций:
+parallel -j 3 freebayes -f ~/project/wuhan.fasta -C 10 -F 0,5 {} ">" {.}.vcf ::: $(ls sample_*_sorted.bam)
+parallel bgzip {} ::: $(ls *.vcf)
+parallel tabix {} ::: $(ls *.vcf.gz)
+vcf-merge -R *.vcf.gz > merged.vcf
+
+12. Получение консенсусных последовательностей:
+for i in {1..10}; do bcftools consensus -f ~/project/wuhan.fasta ~/project/sorted/2/sample_${i}_sorted.vcf.gz -o ~/project/sorted/2/consensus/sample_${i}_consensus.fasta; done
+
+13. Преобразование нуклеотидов в аминокислотные последовательности + извлечение S-гена:
+samtools faidx |  bcftools consensus  | sed "1d" | python -c "from Bio.Seq import Seq; import sys; print(f'>sample_{i}_S_protein\\n' + str(Seq(''.join([x.strip() for x in sys.stdin])).translate()))"
+
+14. Извлечение S-гена из консенсусных последовательностей:
+for i in {1..10}; do samtools faidx ~/project/sorted/2/consensus/sample_${i}_consensus.fasta MN908947.3:21563-25384 > ~/project/sorted/2/consensus/sample_${i}_S_gene.fasta; done
+
+15. Объединение последовательностей S-белков с известными S-белками других штаммов:
+cat ~/project/sorted/2/consensus/S_protein_sequences/sample_*_S_protein.fasta > ~/project/sorted/2/consensus/S_protein_sequences/your_S_proteins.fasta
+
+cp ~/project/covid_surfprot.pep.fa ~/project/sorted/2/consensus/S_protein_sequences
+
+cat ~/project/sorted/2/consensus/S_protein_sequences/your_S_proteins.fasta ~/project/sorted/2/consensus/S_protein_sequences/covid_surfprot.pep.fa > ~/project/sorted/2/consensus/S_protein_sequences/all_S_proteins.fasta
+
+16. Перевод в аминокислотные последовательности:
+
+makeblastdb -in ~/project/sorted/2/consensus/S_protein_sequences/covid_surfprot.pep.fa -dbtype prot -out known_S_proteins_db
+for i in {1..10}; do blastp -query ~/project/sorted/2/consensus/S_protein_sequences/sample_${i}_S_protein.fasta  -db known_S_proteins_db  -out ~/project/sorted/2/consensus/S_protein_sequences/sample_${i}_blastp.out  -outfmt 6  -evalue 1e-5  -num_threads 4;done
+
+17. Подсчитать количество гомологов с высоким процентом идентичности:
+cat sample_${i}_blastp.out | awk '{if($3 > 90) print $0 }' | wc -l
+
+18. Выравнивание нескольких последовательностей:
+linsi ~/project/sorted/2/consensus/S_protein_sequences/all_S_proteins.fasta > ~/project/sorted/2/consensus/S_protein_sequences/all_S_proteins_aligned.fasta
+
+19. Идентификация аминокислотных замен в множественном выравнивании последовательностей, присутствующих в нескольких образцах (>2):
+alv –only-variable all_S_proteins_aligned.fasta
+
+20.Филогенетическое дерево:
+
+FastTree all_S_proteins_aligned.fasta > S_proteins_aligned.tree
+
